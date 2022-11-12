@@ -1,0 +1,162 @@
+name: build
+	
+	# ------------- NOTE
+	# please setup some secrets before running this workflow:
+	# DOCKER_IMAGE should be the target image name on docker hub (e.g. "rustdesk/rustdesk-server-s6" )
+	# DOCKER_IMAGE_CLASSIC should be the target image name on docker hub for the old build (e.g. "rustdesk/rustdesk-server" )
+	# DOCKER_USERNAME is the username you normally use to login at https://hub.docker.com/
+	# DOCKER_PASSWORD is a token you should create under "account settings / security" with read/write access
+	
+	on:
+	  workflow_dispatch:
+	  push:
+	    tags:
+	      - 'v[0-9]+.[0-9]+.[0-9]+'
+	      - '[0-9]+.[0-9]+.[0-9]+'
+	      - 'v[0-9]+.[0-9]+.[0-9]+-[0-9]+'
+	      - '[0-9]+.[0-9]+.[0-9]+-[0-9]+'
+	
+	env:
+	  CARGO_TERM_COLOR: always
+	  LATEST_TAG: latest
+	  
+	jobs:
+	
+	  # binary build
+	  build:
+	
+	    name: Build - ${{ matrix.job.name }}
+	    runs-on: ubuntu-22.04
+	    strategy:
+	      fail-fast: false
+	      matrix:
+	        job:
+	          - { name: "amd64",   target: "x86_64-unknown-linux-musl" }
+	          - { name: "arm64v8", target: "aarch64-unknown-linux-musl" }
+	
+	    steps:
+	      
+	      - name: Checkout
+	        uses: actions/checkout@v3
+	
+	      - name: Install toolchain
+	        uses: actions-rs/toolchain@v1
+	        with:
+	          toolchain: nightly
+	          override: true
+	          default: true
+	          target: ${{ matrix.job.target }}
+	
+	      - name: Build
+	        uses: actions-rs/cargo@v1
+	        with:
+	          command: build
+	          args: --release --all-features --target=${{ matrix.job.target }}
+	          use-cross: true  
+	
+	      # - name: Run tests
+	      #   run: cargo test --verbose
+	
+	      - name: Exec chmod
+	        run: chmod -v a+x target/${{ matrix.job.target }}/release/*
+	
+	      - name: Publish Artifacts
+	        uses: actions/upload-artifact@v3
+	        with:
+	          name: binaries-${{ matrix.job.name }}
+	          path: |
+	            target/${{ matrix.job.target }}/release/hbbr
+	            target/${{ matrix.job.target }}/release/hbbs
+	            target/${{ matrix.job.target }}/release/rustdesk-utils
+	          if-no-files-found: error
+	
+	  # github (draft) release with all binaries
+	  release:
+	
+	    name: Github release
+	    needs: build
+	    runs-on: ubuntu-22.04
+	    strategy:
+	      fail-fast: false
+	      matrix:
+	        job:
+	          - { name: "amd64" }
+	          - { name: "arm64v8" }
+	
+	    steps:
+	
+	      - name: Download binaries (${{ matrix.job.name }})
+	        uses: actions/download-artifact@v3
+	        with:
+	          name: binaries-${{ matrix.job.name }}
+	          path: ${{ matrix.job.name }}
+	
+	      - name: Exec chmod
+	        run: chmod -v a+x ${{ matrix.job.name }}/*
+	
+	      - name: Pack files (${{ matrix.job.name }})
+	        run: |
+	          sudo apt update
+	          DEBIAN_FRONTEND=noninteractive sudo apt install -y zip
+	          zip ${{ matrix.job.name }}/rustdesk-server-linux-${{ matrix.job.name }}.zip ${{ matrix.job.name }}/hbbr ${{ matrix.job.name }}/hbbs ${{ matrix.job.name }}/rustdesk-utils
+	
+	      - name: Create Release (${{ matrix.job.name }})
+	        uses: softprops/action-gh-release@v1
+	        with:
+	          draft: true
+	          files: ${{ matrix.job.name }}/rustdesk-server-linux-${{ matrix.job.name }}.zip
+	            
+	  rpm-package:
+      
+      name: rpm package - ${{ matrix.job.name }}
+      needs: build
+      runs-on: ubuntu-22.04
+      strategy: 
+        fail-fast: false
+        matrix:
+          job:
+            - { name: "amd64",   rpm_platform: "x86_64",   crossbuild_package: "" }
+            - { name: "arm64v8", rpm_platform: "aarch64",  crossbuild_package: "rpm-build-libs-arm64-cross" }
+            - { name: "armv7",   rpm_platform: "armv7hl",  crossbuild_package: "rpm-build-libs-armv7hl-cross" }
+            - { name: "i386",    rpm_platform: "i386",     crossbuild_package: "rpm-build-libs-i386-cross" }
+
+      steps:
+        
+        - name: Checkout
+          uses: actions/checkout@v3
+
+        - name: Set up QEMU
+          uses: docker/setup-qemu-action@v2
+
+        - name: Create packaging env
+          run: |
+            sudo apt update
+            DEBIAN_FRONTEND=noninteractive sudo apt install -y rpm devscripts build-essential debhelper pkg-config ${{ matrix.job.crossbuild_package }}
+            mkdir -p rpm-build/${{ matrix.job.name }}/bin
+        
+        - name: Download binaries
+          uses: actions/download-artifact@v3
+          with:
+            name: binaries-${{ matrix.job.name }}
+            path: rpm-build/${{ matrix.job.name }}/bin
+
+        - name: Build package for ${{ matrix.job.name }} arch
+          run: |
+            chmod -v a+x rpm-build/${{ matrix.job.name }}/bin/*
+            cp -vr rpm systemd rpm-build/${{ matrix.job.name }}/
+            cat rpm/rustdesk-server-hbbr.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-hbbr.spec
+            cat rpm/rustdesk-server-hbbs.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-hbbs.spec
+            cat rpm/rustdesk-server-utils.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-utils.spec
+            cd rpm-build/${{ matrix.job.name }}/
+            rpmbuild -bb rustdesk-server-hbbr.spec
+            rpmbuild -bb rustdesk-server-hbbs.spec
+            rpmbuild -bb rustdesk-server-utils.spec
+
+        - name: Create Release
+          uses: softprops/action-gh-release@v1
+          with:
+            draft: true
+            files: |
+              rpm-build/rustdesk-server-hbbr-*.rpm
+              rpm-build/rustdesk-server-hbbs-*.rpm
+              rpm-build/rustdesk-server-utils-*.rpm
