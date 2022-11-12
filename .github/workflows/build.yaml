@@ -339,3 +339,58 @@ jobs:
             debian-build/rustdesk-server-hbbr_*_${{ matrix.job.debian_platform }}.deb
             debian-build/rustdesk-server-hbbs_*_${{ matrix.job.debian_platform }}.deb
             debian-build/rustdesk-server-utils_*_${{ matrix.job.debian_platform }}.deb
+
+   rpm-package:                                                                                                                                                                                                                                                        
+
+      name: rpm package - ${{ matrix.job.name }}
+      needs: build
+      runs-on: ubuntu-22.04
+      strategy: 
+        fail-fast: false
+        matrix:
+          job:
+            - { name: "amd64",   rpm_platform: "x86_64",   crossbuild_package: "" }
+            - { name: "arm64v8", rpm_platform: "aarch64",  crossbuild_package: "rpm-build-libs-arm64-cross" }
+            - { name: "armv7",   rpm_platform: "armv7hl",  crossbuild_package: "rpm-build-libs-armv7hl-cross" }
+            - { name: "i386",    rpm_platform: "i386",     crossbuild_package: "rpm-build-libs-i386-cross" }
+
+      steps:
+        
+        - name: Checkout
+          uses: actions/checkout@v3
+
+        - name: Set up QEMU
+          uses: docker/setup-qemu-action@v2
+
+        - name: Create packaging env
+          run: |
+            sudo apt update
+            DEBIAN_FRONTEND=noninteractive sudo apt install -y rpm devscripts build-essential debhelper pkg-config ${{ matrix.job.crossbuild_package }}
+            mkdir -p rpm-build/${{ matrix.job.name }}/bin
+
+        - name: Download binaries
+          uses: actions/download-artifact@v3
+          with:
+            name: binaries-${{ matrix.job.name }}
+            path: rpm-build/${{ matrix.job.name }}/bin
+
+        - name: Build package for ${{ matrix.job.name }} arch
+          run: |
+            chmod -v a+x rpm-build/${{ matrix.job.name }}/bin/*
+            cp -vr rpm systemd rpm-build/${{ matrix.job.name }}/
+            cat rpm/rustdesk-server-hbbr.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-hbbr.spec
+            cat rpm/rustdesk-server-hbbs.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-hbbs.spec
+            cat rpm/rustdesk-server-utils.spec.tpl | sed 's/{{ ARCH }}/${{ matrix.job.rpm_platform }}/' > rpm-build/${{ matrix.job.name }}/rustdesk-server-utils.spec
+            cd rpm-build/${{ matrix.job.name }}/
+            rpmbuild -bb rustdesk-server-hbbr.spec
+            rpmbuild -bb rustdesk-server-hbbs.spec
+            rpmbuild -bb rustdesk-server-utils.spec
+
+        - name: Create Release
+          uses: softprops/action-gh-release@v1
+          with:
+            draft: true
+            files: |
+              rpm-build/rustdesk-server-hbbr-*.rpm
+              rpm-build/rustdesk-server-hbbs-*.rpm
+              rpm-build/rustdesk-server-utils-*.rpm
